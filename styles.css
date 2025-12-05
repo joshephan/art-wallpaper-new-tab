@@ -102,3 +102,11 @@ body {
 #action-buttons button:hover {
   background: rgba(0, 0, 0, 0.6);
 }
+
+#pin-btn.pinned {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+#pin-btn.pinned svg {
+  fill: currentColor;
+}

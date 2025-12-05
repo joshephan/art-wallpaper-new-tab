@@ -56,9 +56,14 @@ function saveTodayArtIndex(artIndex) {
 
 // Set wallpaper with validation
 async function setWallpaper() {
-  // Check for saved selection first
-  const savedIndex = getTodaySavedArtIndex();
-  currentArtIndex = savedIndex !== null ? savedIndex : getDailyArtIndex();
+  // Check for pinned art first, then saved selection, then daily
+  const pinnedArt = getPinnedArt();
+  if (pinnedArt !== null) {
+    currentArtIndex = pinnedArt.artIndex;
+  } else {
+    const savedIndex = getTodaySavedArtIndex();
+    currentArtIndex = savedIndex !== null ? savedIndex : getDailyArtIndex();
+  }
 
   let art = getCurrentArt();
   let attempts = 0;
@@ -128,6 +133,50 @@ let currentArtIndex = null;
 
 // Track background size mode
 let bgSizeMode = localStorage.getItem('bgSizeMode') || 'contain';
+
+// Pin functionality
+function getPinnedArt() {
+  const stored = localStorage.getItem('pinnedArt');
+  if (!stored) return null;
+  return JSON.parse(stored);
+}
+
+function savePinnedArt(artIndex) {
+  localStorage.setItem('pinnedArt', JSON.stringify({ artIndex }));
+}
+
+function clearPinnedArt() {
+  localStorage.removeItem('pinnedArt');
+}
+
+function isPinned() {
+  return getPinnedArt() !== null;
+}
+
+function togglePin() {
+  const pinBtn = document.getElementById('pin-btn');
+
+  if (isPinned()) {
+    clearPinnedArt();
+    pinBtn.classList.remove('pinned');
+    pinBtn.title = 'Pin this artwork';
+  } else {
+    savePinnedArt(currentArtIndex);
+    pinBtn.classList.add('pinned');
+    pinBtn.title = 'Unpin artwork';
+  }
+}
+
+function updatePinButton() {
+  const pinBtn = document.getElementById('pin-btn');
+  if (isPinned()) {
+    pinBtn.classList.add('pinned');
+    pinBtn.title = 'Unpin artwork';
+  } else {
+    pinBtn.classList.remove('pinned');
+    pinBtn.title = 'Pin this artwork';
+  }
+}
 
 // Shuffle list management
 function getShuffleList() {
@@ -248,10 +297,14 @@ function init() {
   // Update time tracking every second
   setInterval(updateTimeSpent, 1000);
 
+  // Update pin button state
+  updatePinButton();
+
   // Action buttons
   document.getElementById('heart-btn').addEventListener('click', () => {
     window.open('https://parallax.kr', '_blank');
   });
+  document.getElementById('pin-btn').addEventListener('click', togglePin);
   document.getElementById('fit-btn').addEventListener('click', toggleBackgroundSize);
   document.getElementById('shuffle-btn').addEventListener('click', shuffleArtwork);
   document.getElementById('download-btn').addEventListener('click', downloadArtwork);
