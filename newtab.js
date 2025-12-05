@@ -4,23 +4,174 @@ function getTodayString() {
   return today.toISOString().split('T')[0];
 }
 
-// Get art index for today (deterministic based on date)
-function getDailyArtIndex() {
-  const today = new Date();
-  const startOfYear = new Date(today.getFullYear(), 0, 0);
-  const diff = today - startOfYear;
-  const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
-  return dayOfYear % artList.length;
+// Strip HTML tags and clean text
+function stripHtml(html) {
+  if (!html) return '';
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  return doc.body.textContent?.trim() || '';
 }
 
-// Validate image URL
-function validateImage(url) {
+// Extract clean title from metadata
+function extractTitle(metadata, pageTitle) {
+  // Try ObjectName first
+  if (metadata.ObjectName?.value) {
+    const cleaned = stripHtml(metadata.ObjectName.value);
+    if (cleaned && cleaned.length > 0) return cleaned;
+  }
+
+  // Try to extract from page title (remove "File:" prefix and extension)
+  if (pageTitle) {
+    const title = pageTitle
+      .replace(/^File:/, '')
+      .replace(/\.(jpg|jpeg|png|gif|svg|tif|tiff)$/i, '')
+      .replace(/_/g, ' ')
+      .replace(/ - .+$/, '') // Remove artist suffix
+      .trim();
+    if (title) return title.substring(0, 100);
+  }
+
+  return 'Unknown Title';
+}
+
+// Extract clean artist from metadata
+function extractArtist(metadata) {
+  if (metadata.Artist?.value) {
+    const cleaned = stripHtml(metadata.Artist.value);
+    if (cleaned && cleaned.length > 0) {
+      // Remove common prefixes and clean up
+      return cleaned
+        .replace(/^by\s+/i, '')
+        .replace(/\s*\([^)]*\)\s*/g, ' ')
+        .trim()
+        .substring(0, 100);
+    }
+  }
+  return 'Unknown Artist';
+}
+
+// Wikimedia API - fetch artwork from featured paintings
+async function fetchArtworkFromWikimedia() {
+  const categories = [
+    'Featured_pictures_of_paintings',
+    'Featured_pictures_of_portraits',
+    'Quality_images_of_paintings',
+    'Impressionist_paintings',
+    'Renaissance_paintings',
+    'Baroque_paintings'
+  ];
+
+  const randomCategory = categories[Math.floor(Math.random() * categories.length)];
+  const randomOffset = Math.floor(Math.random() * 100);
+
+  const url = `https://commons.wikimedia.org/w/api.php?` +
+    `action=query&generator=categorymembers&gcmtype=file&gcmtitle=Category:${randomCategory}` +
+    `&gcmlimit=10&gcmoffset=${randomOffset}` +
+    `&prop=imageinfo&iiprop=url|extmetadata` +
+    `&iiurlwidth=1920&format=json&origin=*`;
+
+  try {
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (!data.query || !data.query.pages) {
+      return null;
+    }
+
+    const pages = Object.values(data.query.pages);
+    const validPages = pages.filter(page =>
+      page.imageinfo &&
+      page.imageinfo[0] &&
+      page.imageinfo[0].thumburl
+    );
+
+    if (validPages.length === 0) return null;
+
+    const randomPage = validPages[Math.floor(Math.random() * validPages.length)];
+    const imageInfo = randomPage.imageinfo[0];
+    const metadata = imageInfo.extmetadata || {};
+
+    return {
+      url: imageInfo.thumburl || imageInfo.url,
+      title: extractTitle(metadata, randomPage.title),
+      artist: extractArtist(metadata)
+    };
+  } catch (error) {
+    console.error('Failed to fetch from Wikimedia:', error);
+    return null;
+  }
+}
+
+// Image cache management
+const CACHE_SIZE = 10;
+
+function getImageCache() {
+  const stored = localStorage.getItem('imageCache');
+  if (!stored) return [];
+  return JSON.parse(stored);
+}
+
+function saveImageCache(cache) {
+  localStorage.setItem('imageCache', JSON.stringify(cache));
+}
+
+// Preload image for faster display
+function preloadImage(url) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(url);
     img.onerror = () => reject(new Error('Image failed to load'));
     img.src = url;
   });
+}
+
+// Fill cache to maintain CACHE_SIZE images
+async function fillCache() {
+  let cache = getImageCache();
+
+  while (cache.length < CACHE_SIZE) {
+    const artwork = await fetchArtworkFromWikimedia();
+    if (artwork) {
+      // Check for duplicates
+      const isDuplicate = cache.some(item => item.url === artwork.url);
+      if (!isDuplicate) {
+        try {
+          await preloadImage(artwork.url);
+          cache.push(artwork);
+          saveImageCache(cache);
+        } catch (e) {
+          console.warn('Failed to preload:', artwork.title);
+        }
+      }
+    }
+  }
+
+  return cache;
+}
+
+// Initialize cache in background
+async function initCache() {
+  let cache = getImageCache();
+
+  // If cache is empty, fetch initial images
+  if (cache.length === 0) {
+    await fillCache();
+  } else {
+    // Fill cache in background if not full
+    fillCache();
+  }
+
+  return getImageCache();
+}
+
+// Get current artwork from cache
+function getCurrentArtwork() {
+  const stored = localStorage.getItem('currentArtwork');
+  if (!stored) return null;
+  return JSON.parse(stored);
+}
+
+function saveCurrentArtwork(artwork) {
+  localStorage.setItem('currentArtwork', JSON.stringify(artwork));
 }
 
 // Apply artwork to wallpaper
@@ -34,103 +185,6 @@ function applyArtwork(art) {
   document.getElementById('art-artist').textContent = art.artist;
 }
 
-// Get today's saved art index from localStorage
-function getTodaySavedArtIndex() {
-  const stored = localStorage.getItem('todayArt');
-  if (!stored) return null;
-
-  const data = JSON.parse(stored);
-  if (data.date !== getTodayString()) return null;
-
-  return data.artIndex;
-}
-
-// Save art index for today
-function saveTodayArtIndex(artIndex) {
-  const data = {
-    date: getTodayString(),
-    artIndex: artIndex
-  };
-  localStorage.setItem('todayArt', JSON.stringify(data));
-}
-
-// Set wallpaper with validation
-async function setWallpaper() {
-  // Check for pinned art first, then saved selection, then daily
-  const pinnedArt = getPinnedArt();
-  if (pinnedArt !== null) {
-    currentArtIndex = pinnedArt.artIndex;
-  } else {
-    const savedIndex = getTodaySavedArtIndex();
-    currentArtIndex = savedIndex !== null ? savedIndex : getDailyArtIndex();
-  }
-
-  let art = getCurrentArt();
-  let attempts = 0;
-
-  while (attempts < artList.length) {
-    try {
-      await validateImage(art.url);
-      applyArtwork(art);
-      return;
-    } catch (error) {
-      console.warn(`Failed to load: ${art.title}`, error);
-      currentArtIndex = (currentArtIndex + 1) % artList.length;
-      art = getCurrentArt();
-      attempts++;
-    }
-  }
-
-  // All images failed
-  document.getElementById('art-title').textContent = 'No artwork available';
-  document.getElementById('art-artist').textContent = '';
-}
-
-// Time tracking using localStorage
-function initTimeTracking() {
-  const today = getTodayString();
-  const stored = localStorage.getItem('timeTracking');
-  let data = stored ? JSON.parse(stored) : {};
-
-  // Reset if it's a new day
-  if (data.date !== today) {
-    data = {
-      date: today,
-      timeSpent: 0, // in seconds
-      lastActive: Date.now()
-    };
-  }
-
-  localStorage.setItem('timeTracking', JSON.stringify(data));
-  return data;
-}
-
-// Update time spent
-function updateTimeSpent() {
-  const stored = localStorage.getItem('timeTracking');
-  let data = stored ? JSON.parse(stored) : initTimeTracking();
-  const today = getTodayString();
-
-  // Reset if it's a new day
-  if (data.date !== today) {
-    data = initTimeTracking();
-  }
-
-  const now = Date.now();
-  const elapsed = Math.floor((now - data.lastActive) / 1000);
-
-  // Only count if less than 5 seconds since last update (tab is active)
-  if (elapsed < 5) {
-    data.timeSpent += elapsed;
-  }
-
-  data.lastActive = now;
-  localStorage.setItem('timeTracking', JSON.stringify(data));
-}
-
-// Track current art index
-let currentArtIndex = null;
-
 // Track background size mode
 let bgSizeMode = localStorage.getItem('bgSizeMode') || 'contain';
 
@@ -141,8 +195,8 @@ function getPinnedArt() {
   return JSON.parse(stored);
 }
 
-function savePinnedArt(artIndex) {
-  localStorage.setItem('pinnedArt', JSON.stringify({ artIndex }));
+function savePinnedArt(artwork) {
+  localStorage.setItem('pinnedArt', JSON.stringify(artwork));
 }
 
 function clearPinnedArt() {
@@ -161,9 +215,12 @@ function togglePin() {
     pinBtn.classList.remove('pinned');
     pinBtn.title = 'Pin this artwork';
   } else {
-    savePinnedArt(currentArtIndex);
-    pinBtn.classList.add('pinned');
-    pinBtn.title = 'Unpin artwork';
+    const current = getCurrentArtwork();
+    if (current) {
+      savePinnedArt(current);
+      pinBtn.classList.add('pinned');
+      pinBtn.title = 'Unpin artwork';
+    }
   }
 }
 
@@ -176,54 +233,6 @@ function updatePinButton() {
     pinBtn.classList.remove('pinned');
     pinBtn.title = 'Pin this artwork';
   }
-}
-
-// Shuffle list management
-function getShuffleList() {
-  const stored = localStorage.getItem('shuffleList');
-  if (!stored) return null;
-
-  const data = JSON.parse(stored);
-  if (data.date !== getTodayString()) return null;
-
-  return data.remaining;
-}
-
-function saveShuffleList(remaining) {
-  const data = {
-    date: getTodayString(),
-    remaining: remaining
-  };
-  localStorage.setItem('shuffleList', JSON.stringify(data));
-}
-
-function initShuffleList() {
-  let remaining = getShuffleList();
-  if (!remaining || remaining.length === 0) {
-    // Create new list with all indices except current
-    remaining = artList.map((_, i) => i).filter(i => i !== currentArtIndex);
-    saveShuffleList(remaining);
-  }
-  return remaining;
-}
-
-function getNextShuffleIndex() {
-  let remaining = initShuffleList();
-
-  if (remaining.length === 0) {
-    // All images seen, reset list
-    remaining = artList.map((_, i) => i).filter(i => i !== currentArtIndex);
-  }
-
-  // Pick random from remaining
-  const randomIdx = Math.floor(Math.random() * remaining.length);
-  const nextArtIndex = remaining[randomIdx];
-
-  // Remove from list
-  remaining.splice(randomIdx, 1);
-  saveShuffleList(remaining);
-
-  return nextArtIndex;
 }
 
 // Toggle background size (cover/contain)
@@ -249,35 +258,84 @@ function applyBackgroundSize() {
   }
 }
 
-// Get current art
-function getCurrentArt() {
-  return artList[currentArtIndex];
-}
+// Set wallpaper
+async function setWallpaper() {
+  // Check for pinned art first
+  const pinnedArt = getPinnedArt();
+  if (pinnedArt) {
+    applyArtwork(pinnedArt);
+    return;
+  }
 
-// Shuffle to random artwork
-async function shuffleArtwork() {
-  let attempts = 0;
+  // Check for current artwork
+  let current = getCurrentArtwork();
 
-  while (attempts < artList.length) {
-    const newIndex = getNextShuffleIndex();
-    currentArtIndex = newIndex;
-    const art = getCurrentArt();
+  if (current) {
+    applyArtwork(current);
+  } else {
+    // Get from cache or fetch new
+    let cache = getImageCache();
 
-    try {
-      await validateImage(art.url);
-      applyArtwork(art);
-      saveTodayArtIndex(currentArtIndex);
-      return;
-    } catch (error) {
-      console.warn(`Failed to load: ${art.title}`, error);
-      attempts++;
+    if (cache.length > 0) {
+      current = cache[0];
+      applyArtwork(current);
+      saveCurrentArtwork(current);
+    } else {
+      // Show loading state
+      document.getElementById('art-title').textContent = 'Loading artwork...';
+      document.getElementById('art-artist').textContent = '';
+
+      // Fetch and display
+      await fillCache();
+      cache = getImageCache();
+
+      if (cache.length > 0) {
+        current = cache[0];
+        applyArtwork(current);
+        saveCurrentArtwork(current);
+      } else {
+        document.getElementById('art-title').textContent = 'No artwork available';
+        document.getElementById('art-artist').textContent = '';
+      }
     }
   }
 }
 
+// Shuffle to next artwork
+async function shuffleArtwork() {
+  // Clear pin if shuffling
+  if (isPinned()) {
+    clearPinnedArt();
+    updatePinButton();
+  }
+
+  let cache = getImageCache();
+  const current = getCurrentArtwork();
+
+  // Remove current from cache
+  if (current) {
+    cache = cache.filter(item => item.url !== current.url);
+    saveImageCache(cache);
+  }
+
+  // Get next from cache
+  if (cache.length > 0) {
+    const next = cache[0];
+    applyArtwork(next);
+    saveCurrentArtwork(next);
+  } else {
+    document.getElementById('art-title').textContent = 'Loading...';
+    document.getElementById('art-artist').textContent = '';
+  }
+
+  // Fill cache in background
+  fillCache();
+}
+
 // Download current artwork
 function downloadArtwork() {
-  const art = getCurrentArt();
+  const art = getCurrentArtwork();
+  if (!art) return;
 
   const link = document.createElement('a');
   link.href = art.url;
@@ -288,9 +346,48 @@ function downloadArtwork() {
   document.body.removeChild(link);
 }
 
+// Time tracking using localStorage
+function initTimeTracking() {
+  const today = getTodayString();
+  const stored = localStorage.getItem('timeTracking');
+  let data = stored ? JSON.parse(stored) : {};
+
+  if (data.date !== today) {
+    data = {
+      date: today,
+      timeSpent: 0,
+      lastActive: Date.now()
+    };
+  }
+
+  localStorage.setItem('timeTracking', JSON.stringify(data));
+  return data;
+}
+
+function updateTimeSpent() {
+  const stored = localStorage.getItem('timeTracking');
+  let data = stored ? JSON.parse(stored) : initTimeTracking();
+  const today = getTodayString();
+
+  if (data.date !== today) {
+    data = initTimeTracking();
+  }
+
+  const now = Date.now();
+  const elapsed = Math.floor((now - data.lastActive) / 1000);
+
+  if (elapsed < 5) {
+    data.timeSpent += elapsed;
+  }
+
+  data.lastActive = now;
+  localStorage.setItem('timeTracking', JSON.stringify(data));
+}
+
 // Initialize
-function init() {
-  setWallpaper();
+async function init() {
+  // Set wallpaper immediately from cache
+  await setWallpaper();
   applyBackgroundSize();
   initTimeTracking();
 
@@ -299,6 +396,9 @@ function init() {
 
   // Update pin button state
   updatePinButton();
+
+  // Initialize cache in background
+  initCache();
 
   // Action buttons
   document.getElementById('heart-btn').addEventListener('click', () => {
